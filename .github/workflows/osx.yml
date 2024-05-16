@@ -9,57 +9,137 @@ on:
 
 jobs:
   osx:
-    runs-on: macos-12
+    runs-on: ${{matrix.os}}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - macos-13 # x68
+        - macos-14 # arm64
 
     steps:
       - name: checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: install homebrew deps
-        run: brew install fftw hdf5 boost-python3 cfitsio wcslib wget gfortran gsl ninja
-
-      # See https://github.com/orgs/Homebrew/discussions/3895#discussioncomment-4130560
-      - name: ensure we use homebrew python
+      - name: install dependencies, set python environment
         run: |
-         find /usr/local/bin -lname '*/Library/Frameworks/Python.framework/*' -delete
-         brew unlink python@3.11
-         brew link python@3.11
+          brew install fftw hdf5 cfitsio wcslib gsl ninja
 
-      - name: pip install numpy
-        run: pip3 install numpy
+          # get python prefix
+          export PYTHON_PREFIX=$(brew --prefix python)
+          echo PYTHON_PREFIX=$PYTHON_PREFIX | tee -a $GITHUB_ENV
 
-      - name:  get WSRT measures
-        run: wget ftp://ftp.astron.nl/outgoing/Measures/WSRT_Measures.ztar -O WSRT_Measures.ztar
+          # ensure we use homebrew python
+          export PATH=$PYTHON_PREFIX/bin:${PATH}
+          echo PATH=$PATH | tee -a $GITHUB_ENV
 
-      - name: make build folder
+          # See https://github.com/orgs/Homebrew/discussions/3895#discussioncomment-4130560
+          find /usr/local/bin -lname '*/Library/Frameworks/Python.framework/*' -delete
+
+          # get python executable
+          export PYTHON_EXECUTABLE=$(which python3)
+          echo PYTHON_EXECUTABLE=$PYTHON_EXECUTABLE | tee -a $GITHUB_ENV
+
+          # get installed python version
+          echo PYTHON_VER=$($PYTHON_EXECUTABLE -c "import sys; ver=sys.version_info; print(f'{ver.major}.{ver.minor}')") | tee -a $GITHUB_ENV
+
+          # get python include dir
+          echo PYTHON_INCLUDE=$($PYTHON_EXECUTABLE -c "import sysconfig; print(sysconfig.get_config_var('INCLUDEPY'))") | tee -a $GITHUB_ENV
+
+          # get numpy include dir
+          pip3 install --break-system-packages numpy
+          echo PYTHON_NUMPY_INCLUDE=$($PYTHON_EXECUTABLE -c "import numpy; print(numpy.get_include())") | tee -a $GITHUB_ENV
+
+          # get fortran compiler path
+          echo FORTRAN_COMPILER=$(which gfortran-13) | tee -a $GITHUB_ENV
+
+
+      # can't use brew boost (1.85) because of https://github.com/casacore/casacore/issues/1348
+      - name: install boost 1.83.0 with python
         run: |
+          export BOOST_VER=1.83.0
+          echo BOOST_VER=$BOOST_VER | tee -a $GITHUB_ENV
+          wget https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}.tar.xz
+          tar xf boost-${BOOST_VER}.tar.xz
+          cd boost-${BOOST_VER}
+
+          # set boost root
+          export BOOST_ROOT=$(pwd)/root
+          mkdir -p $BOOST_ROOT
+          echo BOOST_ROOT=$BOOST_ROOT | tee -a $GITHUB_ENV
+          export BOOST_INCLUDE=$BOOST_ROOT/include
+          mkdir -p $BOOST_INCLUDE
+          echo BOOST_INCLUDE=$BOOST_INCLUDE | tee -a $GITHUB_ENV
+          export BOOST_LIB=$BOOST_ROOT/lib
+          mkdir -p $BOOST_LIB
+          echo BOOST_LIB=$BOOST_LIB | tee -a $GITHUB_ENV
+
+          cat <<EOF > user-config.jam
+          using python  : ${PYTHON_VER}
+                        : ${PYTHON_EXECUTABLE}
+                        : ${PYTHON_INCLUDE}
+                        : ${PYTHON_PREFIX}/lib ;
+          EOF
+
+          ./bootstrap.sh \
+            --prefix=${BOOST_ROOT} \
+            --libdir=${BOOST_LIB} \
+            --with-icu=$(brew --prefix icu4c) \
+            --with-libraries=python \
+            --with-python=${PYTHON_EXECUTABLE} \
+            --with-python-root=${PYTHON_PREFIX}
+
+          ./b2 \
+            python=${PYTHON_VER} \
+            -d2 \
+            --libdir=${BOOST_LIB} \
+            --prefix=${BOOST_ROOT} \
+            --layout=tagged-1.66 \
+            --user-config=user-config.jam \
+            install \
+            threading=multi,single \
+            link=shared,static \
+            cxxflags=-std=c++14
+
+          # check boost include
+          ls $BOOST_INCLUDE
+
+      - name: set up build folder with WSRT measures
+        run: |
+          wget ftp://ftp.astron.nl/outgoing/Measures/WSRT_Measures.ztar -O WSRT_Measures.ztar
           mkdir -p build
           cd build
           tar zxvf ../WSRT_Measures.ztar
+          rm ../WSRT_Measures.ztar
 
       - name: configure
         run: |
           cd build
           cmake \
             -G Ninja \
-            -DBUILD_TESTING=ON \
+            -DCMAKE_Fortran_COMPILER=$FORTRAN_COMPILER \
             -DCMAKE_PREFIX_PATH=/usr/local/ \
-            -DUSE_OPENMP=OFF \
-            -DUSE_HDF5=ON \
+            -DBOOST_INCLUDEDIR=$BOOST_INCLUDE \
+            -DBOOST_LIBRARYDIR=$BOOST_LIB \
+            -DBOOST_ROOT=$BOOST_ROOT \
+            -DBoost_NO_BOOST_CMAKE=True \
+            -DBUILD_TESTING=ON \
             -DBUILD_PYTHON=OFF \
             -DBUILD_PYTHON3=ON \
-            -DPython3_EXECUTABLE=`which python3.11` \
-            -DBoost_NO_BOOST_CMAKE=True \
-            -DCMAKE_Fortran_COMPILER=gfortran-13 \
-            -DDATA_DIR=. ..
+            -DPython3_EXECUTABLE=$PYTHON_EXECUTABLE \
+            -DPython3_NumPy_INCLUDE_DIR=$PYTHON_NUMPY_INCLUDE \
+            -DUSE_HDF5=ON \
+            -DUSE_OPENMP=OFF \
+            -DDATA_DIR=. \
+            ..
 
-      - name: build
-        run: cmake --build build
+      - name: make
+        run: cmake --build ./build
 
       - name: run tests
         run: |
           cd build
-          CTEST_OUTPUT_ON_FAILURE=1 ctest -E tConvert
+          CTEST_OUTPUT_ON_FAILURE=1 ctest
 
       - name: install
         run: cmake --build build --target install
