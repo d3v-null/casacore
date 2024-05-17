@@ -23,86 +23,14 @@ jobs:
 
       - name: install dependencies, set python environment
         run: |
-          brew install fftw hdf5 cfitsio wcslib gsl ninja
+          # Delete GitHub Python, See https://github.com/orgs/Homebrew/discussions/3895#discussioncomment-4130560
+          find /usr/local/bin -lname '*/Library/Frameworks/Python.framework/*' -print -delete
 
-          # get python prefix
-          export PYTHON_PREFIX=$(brew --prefix python)
-          echo PYTHON_PREFIX=$PYTHON_PREFIX | tee -a $GITHUB_ENV
+          brew install fftw hdf5 boost-python3 numpy cfitsio wcslib gsl ninja
 
-          # ensure we use homebrew python
-          export PATH=$PYTHON_PREFIX/bin:${PATH}
+          # ensure we use homebrew python (needed for macos-13-x86, not macos-14-arm64)
+          export PATH=$(brew --prefix python)/bin:${PATH}
           echo PATH=$PATH | tee -a $GITHUB_ENV
-
-          # See https://github.com/orgs/Homebrew/discussions/3895#discussioncomment-4130560
-          find /usr/local/bin -lname '*/Library/Frameworks/Python.framework/*' -delete
-
-          # get python executable
-          export PYTHON_EXECUTABLE=$(which python3)
-          echo PYTHON_EXECUTABLE=$PYTHON_EXECUTABLE | tee -a $GITHUB_ENV
-
-          # get installed python version
-          echo PYTHON_VER=$($PYTHON_EXECUTABLE -c "import sys; ver=sys.version_info; print(f'{ver.major}.{ver.minor}')") | tee -a $GITHUB_ENV
-
-          # get python include dir
-          echo PYTHON_INCLUDE=$($PYTHON_EXECUTABLE -c "import sysconfig; print(sysconfig.get_config_var('INCLUDEPY'))") | tee -a $GITHUB_ENV
-
-          # get numpy include dir
-          pip3 install --break-system-packages numpy
-          echo PYTHON_NUMPY_INCLUDE=$($PYTHON_EXECUTABLE -c "import numpy; print(numpy.get_include())") | tee -a $GITHUB_ENV
-
-          # get fortran compiler path
-          echo FORTRAN_COMPILER=$(which gfortran-13) | tee -a $GITHUB_ENV
-
-
-      # can't use brew boost (1.85) because of https://github.com/casacore/casacore/issues/1348
-      - name: install boost 1.83.0 with python
-        run: |
-          export BOOST_VER=1.83.0
-          echo BOOST_VER=$BOOST_VER | tee -a $GITHUB_ENV
-          wget https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}.tar.xz
-          tar xf boost-${BOOST_VER}.tar.xz
-          cd boost-${BOOST_VER}
-
-          # set boost root
-          export BOOST_ROOT=$(pwd)/root
-          mkdir -p $BOOST_ROOT
-          echo BOOST_ROOT=$BOOST_ROOT | tee -a $GITHUB_ENV
-          export BOOST_INCLUDE=$BOOST_ROOT/include
-          mkdir -p $BOOST_INCLUDE
-          echo BOOST_INCLUDE=$BOOST_INCLUDE | tee -a $GITHUB_ENV
-          export BOOST_LIB=$BOOST_ROOT/lib
-          mkdir -p $BOOST_LIB
-          echo BOOST_LIB=$BOOST_LIB | tee -a $GITHUB_ENV
-
-          cat <<EOF > user-config.jam
-          using python  : ${PYTHON_VER}
-                        : ${PYTHON_EXECUTABLE}
-                        : ${PYTHON_INCLUDE}
-                        : ${PYTHON_PREFIX}/lib ;
-          EOF
-
-          ./bootstrap.sh \
-            --prefix=${BOOST_ROOT} \
-            --libdir=${BOOST_LIB} \
-            --with-icu=$(brew --prefix icu4c) \
-            --with-libraries=python \
-            --with-python=${PYTHON_EXECUTABLE} \
-            --with-python-root=${PYTHON_PREFIX}
-
-          ./b2 \
-            python=${PYTHON_VER} \
-            -d2 \
-            --libdir=${BOOST_LIB} \
-            --prefix=${BOOST_ROOT} \
-            --layout=tagged-1.66 \
-            --user-config=user-config.jam \
-            install \
-            threading=multi,single \
-            link=shared,static \
-            cxxflags=-std=c++14
-
-          # check boost include
-          ls $BOOST_INCLUDE
 
       - name: set up build folder with WSRT measures
         run: |
@@ -117,24 +45,20 @@ jobs:
           cd build
           cmake \
             -G Ninja \
-            -DCMAKE_Fortran_COMPILER=$FORTRAN_COMPILER \
+            -DCMAKE_Fortran_COMPILER=$(which gfortran-13) \
             -DCMAKE_PREFIX_PATH=/usr/local/ \
-            -DBOOST_INCLUDEDIR=$BOOST_INCLUDE \
-            -DBOOST_LIBRARYDIR=$BOOST_LIB \
-            -DBOOST_ROOT=$BOOST_ROOT \
             -DBoost_NO_BOOST_CMAKE=True \
             -DBUILD_TESTING=ON \
             -DBUILD_PYTHON=OFF \
             -DBUILD_PYTHON3=ON \
-            -DPython3_EXECUTABLE=$PYTHON_EXECUTABLE \
-            -DPython3_NumPy_INCLUDE_DIR=$PYTHON_NUMPY_INCLUDE \
+            -DPython3_EXECUTABLE=$(which python3) \
             -DUSE_HDF5=ON \
             -DUSE_OPENMP=OFF \
             -DDATA_DIR=. \
             ..
 
       - name: make
-        run: cmake --build ./build
+        run: cmake --build build
 
       - name: run tests
         run: |
