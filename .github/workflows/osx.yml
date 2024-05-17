@@ -2,10 +2,10 @@ name: macOS
 
 on:
   push:
-    branches: [ master ]
+    branches: [ "*" ] # DEV: DON'T PR THIS !!!
     tags: [ "*" ]
   pull_request:
-    branches: [ master ]
+    branches: [ "master" ]
 
 jobs:
   osx:
